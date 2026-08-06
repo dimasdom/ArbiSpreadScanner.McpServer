@@ -1,0 +1,7 @@
+<Solution>
+  <Project Path="ArbiScanner.McpServer.Domain/ArbiScanner.McpServer.Domain.csproj" />
+  <Project Path="ArbiScanner.McpServer.Abstractions/ArbiScanner.McpServer.Abstractions.csproj" />
+  <Project Path="ArbiScanner.McpServer.Infrastructure/ArbiScanner.McpServer.Infrastructure.csproj" />
+  <Project Path="ArbiScanner.McpServer.Host/ArbiScanner.McpServer.Host.csproj" />
+  <Project Path="ArbiScanner.McpServer.Tests/ArbiScanner.McpServer.Tests.csproj" />
+</Solution>
