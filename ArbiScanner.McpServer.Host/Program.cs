@@ -1,5 +1,5 @@
 using ArbiScanner.McpServer.Infrastructure;
-using ArbiScanner.McpServer.Infrastructure.HealthChecks;
+using ArbiScanner.McpServer.Infrastructure.Authentication;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
@@ -25,19 +25,19 @@ try
         }
     });
 
-    builder.Services.AddOutboundOptions(builder.Configuration);
+    builder.Services.AddHttpContextAccessor();
+    builder.Services.AddKeycloakOptions(builder.Configuration);
     builder.Services.AddOutboundHttpClients(builder.Configuration);
     builder.Services.AddMcpServices();
-    builder.Services.AddInboundAuthenticationJwt(builder.Configuration, builder.Environment);
-    builder.Services.AddAuthorization();
 
     builder.Services
         .AddMcpServer()
         .WithHttpTransport()
         .WithToolsFromAssembly();
 
-    builder.Services.AddHealthChecks()
-        .AddCheck<OutboundTokenHealthCheck>("outbound-token");
+    // No specific checks — this service holds no server-wide credential to validate
+    // anymore (see McpAuthenticationMiddleware); /health is bare liveness.
+    builder.Services.AddHealthChecks();
 
     var observabilityEnabled = builder.Configuration.GetValue("Observability:Enabled", true);
     if (observabilityEnabled)
@@ -71,14 +71,19 @@ try
     if (app.Environment.IsDevelopment())
         app.UseHttpsRedirection();
 
-    app.UseAuthentication();
-    app.UseAuthorization();
+    // MCP tool calls (SpreadTools) always require a bearer token that exchanges
+    // successfully against Keycloak — see McpAuthenticationMiddleware and
+    // KeycloakRefreshTokenProvider. Scoped to /mcp only so /health stays open for
+    // Docker healthchecks with no credential.
+    app.UseWhen(
+        ctx => ctx.Request.Path.StartsWithSegments("/mcp"),
+        branch => branch.UseMiddleware<McpAuthenticationMiddleware>());
 
-    // MCP tool calls (SpreadTools) always require a valid inbound Keycloak bearer token
-    // — see ArbiScanner.McpServer.Infrastructure.StartupSetup.AddInboundAuthenticationJwt.
-    // This is purely a "may this caller hit the server" gate; the caller's identity is
-    // not used for data scoping (see OutboundKeycloakOptions).
-    app.MapMcp().RequireAuthorization();
+    // Explicit "/mcp" (rather than the SDK's root-mapped default) so this matches
+    // regardless of whether the caller reaches this container directly
+    // (docker-compose.local.yml, port 8087) or through the nginx /mcp/ route, which
+    // preserves the path rather than stripping it — see nginx/nginx.conf.
+    app.MapMcp("/mcp");
     app.MapHealthChecks("/health");
 
     await app.RunAsync();

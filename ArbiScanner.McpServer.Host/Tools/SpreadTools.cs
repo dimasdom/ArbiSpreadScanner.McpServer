@@ -7,8 +7,8 @@ namespace ArbiScanner.McpServer.Host.Tools;
 
 /// <summary>
 /// MCP tools wrapping ArbiScannerWeb.API's TradeOpportunityController. Both tools act on
-/// behalf of the one ArbiScanner account configured via OutboundKeycloakOptions — they are
-/// not scoped by the inbound MCP caller's identity (see StartupSetup.AddInboundAuthenticationJwt).
+/// behalf of whichever ArbiScanner account the caller's own presented token belongs to — see
+/// Infrastructure.Authentication.McpAuthenticationMiddleware.
 /// </summary>
 [McpServerToolType]
 public sealed class SpreadTools

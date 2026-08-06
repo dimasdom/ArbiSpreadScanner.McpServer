@@ -4,7 +4,9 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using ArbiScanner.McpServer.Abstractions.Interfaces;
 using ArbiScanner.McpServer.Domain.Dtos;
+using ArbiScanner.McpServer.Infrastructure.Authentication;
 using FluentResults;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 
 namespace ArbiScanner.McpServer.Infrastructure.Services;
@@ -15,15 +17,18 @@ public sealed class SpreadsApiClient : ISpreadsApiClient
 
     private readonly HttpClient _httpClient;
     private readonly IOutboundTokenProvider _tokenProvider;
+    private readonly IHttpContextAccessor _httpContextAccessor;
     private readonly ILogger<SpreadsApiClient> _logger;
 
     public SpreadsApiClient(
         IHttpClientFactory httpClientFactory,
         IOutboundTokenProvider tokenProvider,
+        IHttpContextAccessor httpContextAccessor,
         ILogger<SpreadsApiClient> logger)
     {
         _httpClient = httpClientFactory.CreateClient("WebApi");
         _tokenProvider = tokenProvider;
+        _httpContextAccessor = httpContextAccessor;
         _logger = logger;
     }
 
@@ -75,7 +80,14 @@ public sealed class SpreadsApiClient : ISpreadsApiClient
     private async Task<HttpResponseMessage> SendAuthenticatedAsync(
         string relativeUrl, CancellationToken cancellationToken, bool forceRefresh = false)
     {
-        var tokenResult = await _tokenProvider.GetAccessTokenAsync(cancellationToken, forceRefresh);
+        // McpAuthenticationMiddleware already validated a bearer token is present on this
+        // request before any tool call could reach here — this re-reads the same header
+        // rather than threading the value through, and hits the cache
+        // KeycloakRefreshTokenProvider already primed unless forceRefresh is set.
+        var presentedToken = BearerTokenReader.Read(_httpContextAccessor.HttpContext)
+            ?? throw new InvalidOperationException("No inbound bearer token present on the current request.");
+
+        var tokenResult = await _tokenProvider.GetAccessTokenAsync(presentedToken, cancellationToken, forceRefresh);
         if (tokenResult.IsFailed)
         {
             throw new InvalidOperationException(
