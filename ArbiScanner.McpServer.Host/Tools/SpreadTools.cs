@@ -7,8 +7,8 @@ namespace ArbiScanner.McpServer.Host.Tools;
 
 /// <summary>
 /// MCP tools wrapping ArbiScannerWeb.API's TradeOpportunityController. Both tools act on
-/// behalf of whichever ArbiScanner account the caller's own presented token belongs to — see
-/// Infrastructure.Authentication.McpAuthenticationMiddleware.
+/// behalf of whichever ArbiScanner account the caller's own bearer token belongs to —
+/// see Infrastructure.StartupSetup.AddAuthenticationJwt and SpreadsApiClient.
 /// </summary>
 [McpServerToolType]
 public sealed class SpreadTools

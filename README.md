@@ -4,8 +4,8 @@
 A .NET 10 [Model Context Protocol](https://modelcontextprotocol.io) server that exposes two
 read-only tools — the currently-open arbitrage spread opportunities for the caller's own
 ArbiScanner account, and the detail of a single spread by id — by calling `ArbiScannerWeb.API`
-over plain HTTP. It is a thin proxy: it owns no data of its own and contains no business logic
-beyond authentication and response mapping.
+over plain HTTP. It is a thin proxy: it owns no data of its own, mints no tokens of its own,
+and contains no business logic beyond JWT validation and response mapping.
 
 ---
 
@@ -38,14 +38,14 @@ It is **multi-tenant by pass-through**: any user can generate their own personal
 ArbiScannerWeb.Client's "MCP Access" page and use it in their own MCP client, and every tool
 call is scoped to *that* user's account, not a shared/fixed one. There is no per-server
 "which account" configuration — the caller's presented token is what determines whose data
-comes back.
+comes back, and this server never mints or exchanges a token of its own.
 
 ---
 
 ## How authentication works
 
-There is exactly **one** token in play, and it plays two roles at once — worth being explicit
-about, since it's not how a typical resource server works:
+There is exactly **one** token in play end to end, and this server just validates and
+forwards it — it is a plain OAuth resource server, nothing more:
 
 ```
 ArbiScannerWeb.Client ("MCP Access" page)
@@ -53,29 +53,31 @@ ArbiScannerWeb.Client ("MCP Access" page)
       v
 ArbiScannerWeb.API's McpTokenController -> McpTokenService
       |  Standard Token Exchange (RFC 8693): exchanges the user's own
-      |  session token for an offline_access refresh token scoped to
-      |  the arbiscanner-mcp client
+      |  session token for a new access token scoped to arbiscanner-mcp
+      |  (aud includes both arbiscanner-mcp and arbiscanner-web-spa)
       v
-Keycloak (arbiscanner-web realm, arbiscanner-mcp client)
-      |
+Keycloak (arbiscanner-web realm, arbiscanner-mcp client — whose
+          access.token.lifespan is overridden to 30 days, see the
+          realm export; scope=offline_access is requested purely to
+          make the underlying session an *offline* session so that
+          override isn't capped by the realm's ~10h SSO Session Max —
+          Standard Token Exchange does not actually issue a usable
+          refresh_token here, confirmed against a real container)
       v
-long-lived offline_access refresh token  ── user copies this into their MCP client config
+one long-lived (30-day) access token ── user copies this into their MCP client config
 
 ────────────────────────────────────────────────────────────────────────
 
 MCP client (Claude Desktop, etc.)
-      |  Authorization: Bearer <that same refresh token>
+      |  Authorization: Bearer <that same access token>
       v
-ArbiScanner.McpServer's McpAuthenticationMiddleware
-      |  grant_type=refresh_token against the SAME arbiscanner-mcp client
+ArbiScanner.McpServer — standard AddJwtBearer resource-server validation
+      |  (Authority=arbiscanner-web realm, Audience=arbiscanner-mcp;
+      |   local JWKS-based validation, no Keycloak round-trip per request)
       v
-Keycloak                                        (cached per presented token,
-      |                                          ~30s-before-expiry refresh —
-      v                                          see KeycloakRefreshTokenProvider)
-short-lived access token, aud=[arbiscanner-mcp, arbiscanner-web-spa]
-      |
-      |  SpreadTools.GetSpreadsForCurrentUser / GetSpreadById -> ISpreadsApiClient
-      |  forwards the SAME exchanged access token as-is
+SpreadTools.GetSpreadsForCurrentUser / GetSpreadById -> ISpreadsApiClient
+      |  forwards the SAME validated token as-is (it already carries the
+      |  arbiscanner-web-spa audience too)
       v
 GET /api/TradeOpportunity/GetSpreadsForUser | GetSpreadInfo/{id}
       v
@@ -84,19 +86,24 @@ ArbiScannerWeb.API   (resolves "current user" from that token's own sub claim �
                        to build there)
 ```
 
-Why a refresh token, not a plain access token: MCP clients like Claude Desktop store one
-static bearer value and never do an OAuth refresh dance themselves. A raw Keycloak access
-token is short-lived (minutes) and would go stale almost immediately. A refresh token
-obtained with `offline_access` is Keycloak's purpose-built mechanism for exactly this —
-"long-lived credential, held by something that isn't a browser session." This server does
-the actual refreshing on the caller's behalf, once per request (cached), so the token the
-user pastes into their MCP client just works indefinitely without them touching it again.
+The one non-obvious piece: getting a *long-lived* credential out of Keycloak. MCP clients
+like Claude Desktop store one static bearer value and never do an OAuth refresh dance
+themselves, and a normal Keycloak access token is short-lived (minutes). Two things not
+usually needed together make the long-lived token work: the `arbiscanner-mcp` client's own
+`access.token.lifespan` attribute is overridden to 30 days (see
+`keycloak/realm-export/arbiscanner-web-realm.json`), **and** the token exchange request
+includes `scope=offline_access` — not to get a refresh token back (it doesn't; confirmed
+against a real Keycloak 26.4 container, `refresh_expires_in` comes back `0` either way), but
+because requesting that scope is what upgrades the exchange's underlying session to an
+*offline* session, which isn't bound by the realm's `SSO Session Max` (~10h default) the way
+a normal session is. Drop either half and the resulting token quietly reverts to a
+session-bound lifetime instead of the intended 30 days — this was caught by, and is asserted
+directly in, `ArbiScannerWeb.IntegrationTests`' `McpTokenControllerTests` (decodes the real
+JWT's own `exp` claim rather than trusting the token endpoint's `expires_in` field).
 
-There is no separate "is this caller allowed to hit the server at all" check distinct from
-the token exchange itself — a successful `grant_type=refresh_token` call **is** the
-authentication check (an invalid, expired, or revoked token simply fails the exchange and the
-middleware returns 401). See `KeycloakOptions` for the `arbiscanner-mcp` client config both
-`ArbiScannerWeb.API` (to mint tokens) and this server (to redeem them) share.
+Because the SAME token is forwarded downstream unchanged, there's no separate outbound
+credential, no per-request Keycloak call, and no server-held secret in this project at all —
+just standard bearer-token validation.
 
 ---
 
@@ -110,25 +117,23 @@ token like a password and keep track of where you've pasted it.
 
 For manual testing without the UI (e.g. hitting a local dev instance), obtain a token the same
 way the load tests do — Resource Owner Password Credentials against the `arbiscanner-mcp`
-client, requesting `offline_access`:
+client:
 
 ```bash
 curl -s https://auth.arbiscannerwebapp.site/realms/arbiscanner-web/protocol/openid-connect/token \
   -d grant_type=password \
   -d client_id=arbiscanner-mcp \
   -d client_secret="$KEYCLOAK_MCP_CLIENT_SECRET" \
-  -d scope=offline_access \
   -d username=<account-email> \
   -d password=<account-password> \
-  | jq -r .refresh_token
+  | jq -r .access_token
 ```
 
 Against local Keycloak (`docker-compose.local.yml`), use
 `http://localhost:8082/realms/arbiscanner-web/protocol/openid-connect/token` instead. Then call
-the server directly, e.g. via an MCP inspector CLI or
-`curl -X POST http://localhost:8087/mcp -H "Authorization: Bearer <token>" -H "Content-Type: application/json" -d '{...}'`
-(Streamable HTTP JSON-RPC — see the [MCP transport spec](https://modelcontextprotocol.io) for
-the request shape).
+the server directly, e.g. via an MCP inspector CLI or the real MCP client SDK pointed at
+`http://localhost:8087/mcp` with that token as the bearer (Streamable HTTP transport — see the
+[MCP transport spec](https://modelcontextprotocol.io)).
 
 ---
 
@@ -159,43 +164,35 @@ No external package dependencies.
 
 ### ArbiScanner.McpServer.Abstractions
 
-Two interfaces: `ISpreadsApiClient` (the two outbound calls, returning `FluentResults`'
-`Result`/`Result<T>` per this monorepo's convention) and `IOutboundTokenProvider` (the
-caller-presented-refresh-token-to-access-token exchange).
+One interface: `ISpreadsApiClient` (the two outbound calls, returning `FluentResults`'
+`Result`/`Result<T>` per this monorepo's convention).
 
 ### ArbiScanner.McpServer.Infrastructure
 
-- `SpreadsApiClient` — typed `HttpClient` against `ArbiScannerWeb.API`, attaches whatever
-  access token `IOutboundTokenProvider` returns for the current request's presented token,
-  deserializes the `SerializableResult<T>` envelope shape, retries once on 401 after a forced
-  token refresh.
-- `KeycloakRefreshTokenProvider` — the refresh-token grant exchange, caching per *presented*
-  token (never the raw token itself — see its `ComputeCacheKey`, which hashes it) with an
-  `IMemoryCache` and a per-token `SemaphoreSlim`-guarded double-checked refresh, so concurrent
-  tool calls from the *same* caller don't each trigger their own Keycloak round-trip, without
-  serializing unrelated callers against each other.
+- `SpreadsApiClient` — typed `HttpClient` against `ArbiScannerWeb.API`, reads the current
+  request's own bearer token (via `Authentication/BearerTokenReader`) and forwards it as-is,
+  deserializes the `SerializableResult<T>` envelope shape. A 401 from `ArbiScannerWeb.API` is
+  surfaced as a plain failure, not retried — there's nothing to refresh, since this server
+  doesn't hold or manage the token's lifecycle at all.
 - `Authentication/BearerTokenReader` — the one place that reads `Authorization: Bearer …` off
-  a request, shared by the middleware below and `SpreadsApiClient` so both agree on exactly
-  what "the presented token" means.
-- `Authentication/McpAuthenticationMiddleware` — gates `/mcp`: extracts the presented token,
-  exchanges it via `IOutboundTokenProvider`, and 401s if that fails. This *is* the
-  authentication check — there's no separate JWT-validation step, because the presented
-  string isn't a genuine access token, it's the refresh token from [Getting a
-  token](#getting-a-token).
-- `StartupSetup` — DI wiring for the HTTP clients, memory cache, and services above.
+  a request, so `SpreadsApiClient` and any future caller agree on exactly what "the presented
+  token" means.
+- `StartupSetup` — `AddAuthenticationJwt` (a verbatim structural copy of
+  `ArbiScannerWeb.Infrastructure.StartupSetup.AddAuthenticationJwt` — deliberately not a new
+  invention), plus DI wiring for the `WebApi` HTTP client and `SpreadsApiClient`.
 
 ### ArbiScanner.McpServer.Host
 
-Entry point and composition root. `Program.cs` wires DI, health checks, Serilog, and
-OpenTelemetry, calls `AddMcpServer().WithHttpTransport().WithToolsFromAssembly()`, and applies
-`McpAuthenticationMiddleware` only to the `/mcp` path (`app.UseWhen(...)`) so `/health` stays
-open for Docker healthchecks with no credential. `MapMcp("/mcp")` is explicit (not the SDK's
-root-mapped default) so it matches whether reached directly (`docker-compose.local.yml`, port
-8087) or through nginx's `/mcp` route, which proxies the path through unchanged — see
-`nginx/nginx.conf`. `Tools/SpreadTools.cs` is the `[McpServerToolType]` class implementing the
-two tools above, constructor-injected with `ISpreadsApiClient` — mirrors how
-`TradeOpportunityController` sits directly in `ArbiScannerWeb.API` and calls
-`ITradeOpportunityService`.
+Entry point and composition root. `Program.cs` wires DI, standard `AddAuthentication()
+.AddJwtBearer(...)`/`AddAuthorization()`, health checks, Serilog, and OpenTelemetry, then calls
+`AddMcpServer().WithHttpTransport().WithToolsFromAssembly()`. `MapMcp("/mcp").RequireAuthorization()`
+is explicit about both the path (not the SDK's root-mapped default, so it matches whether
+reached directly — `docker-compose.local.yml`, port 8087 — or through nginx's `/mcp` route,
+which proxies the path through unchanged, see `nginx/nginx.conf`) and the auth requirement;
+`/health` is mapped separately with no such requirement, for Docker healthchecks.
+`Tools/SpreadTools.cs` is the `[McpServerToolType]` class implementing the two tools above,
+constructor-injected with `ISpreadsApiClient` — mirrors how `TradeOpportunityController` sits
+directly in `ArbiScannerWeb.API` and calls `ITradeOpportunityService`.
 
 ---
 
@@ -205,6 +202,7 @@ two tools above, constructor-injected with `ISpreadsApiClient` — mirrors how
 |---|---|
 | .NET 10 | Runtime and ASP.NET Core host |
 | ModelContextProtocol / ModelContextProtocol.AspNetCore | MCP server SDK, Streamable HTTP transport |
+| Microsoft.AspNetCore.Authentication.JwtBearer | Resource-server bearer-token validation against Keycloak |
 | FluentResults | Result-type error handling, matching the rest of this monorepo |
 | Serilog + Serilog.Sinks.GrafanaLoki | Structured logging shipped to Grafana Loki |
 | OpenTelemetry SDK + OTLP exporter | Distributed tracing to Grafana Tempo |
@@ -218,9 +216,10 @@ two tools above, constructor-injected with `ISpreadsApiClient` — mirrors how
 - [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)
 - A running `ArbiScannerWeb.API` instance
 - The `arbiscanner-mcp` client provisioned in the `arbiscanner-web` Keycloak realm, with
-  **Standard Token Exchange enabled** (see the monorepo root's `keycloak/README.md` step 9 —
-  included in a fresh realm import, but needs a one-time manual step on an already-deployed
-  realm, and needs the Keycloak image built with `--features=token-exchange`)
+  **Standard Token Exchange enabled** and its `access.token.lifespan` override in place (see
+  the monorepo root's `keycloak/README.md` step 9 — included in a fresh realm import, but
+  needs a one-time manual step on an already-deployed realm, and needs the Keycloak image
+  built with `--features=token-exchange`)
 - A personal token — see [Getting a token](#getting-a-token)
 
 ---
@@ -265,18 +264,19 @@ ASP.NET Core `__` double-underscore convention.
 
 | Variable | Description |
 |---|---|
-| `Keycloak__Authority` | Keycloak realm issuer (`arbiscanner-web` realm) — resolves the token endpoint |
-| `Keycloak__ClientId` | `arbiscanner-mcp` confidential client id |
-| `Keycloak__ClientSecret` | `arbiscanner-mcp` client secret |
+| `Keycloak__Authority` | Keycloak realm issuer (`arbiscanner-web` realm) — resolves JWKS for token validation |
+| `Keycloak__Audience` | Expected audience claim on incoming tokens — `arbiscanner-mcp` |
 | `WebApi__BaseUrl` | Base URL of `ArbiScannerWeb.API`, e.g. `http://web:8080` |
 | `Serilog__WriteTo__1__Args__uri` | Grafana Loki endpoint URL |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP gRPC endpoint for Grafana Tempo |
 | `Observability__Enabled` | Toggles OpenTelemetry wiring (`true`/`false`) |
 
-The root monorepo's `sample.env` documents the corresponding `KEYCLOAK_MCP_CLIENT_ID` /
-`KEYCLOAK_MCP_CLIENT_SECRET` / `MCP_WEB_API_URL` variables that `docker-compose.yml` maps onto
-the ones above for the containerised deployment — the same `arbiscanner-mcp` client
-credentials are also used by `ArbiScannerWeb.API`'s `McpTokenService` to mint tokens.
+Note this service holds **no client secret** — it only validates tokens, it never calls
+Keycloak itself. The root monorepo's `sample.env` documents `KEYCLOAK_MCP_CLIENT_ID` /
+`KEYCLOAK_MCP_CLIENT_SECRET` / `MCP_WEB_API_URL`, which `docker-compose.yml` maps onto the
+variables above (client id/secret are only actually used by `ArbiScannerWeb.API`'s
+`McpTokenService`, to mint tokens — this server doesn't need them, but the id needs to match
+what tokens are actually audienced to).
 
 ---
 
@@ -311,8 +311,10 @@ do.
 
 Runs on every push/PR to `main`: SonarCloud scan (project
 `dimasdom_ArbiSpreadScanner.McpServer`, `sonar.qualitygate.wait=true`), CodeQL, `dotnet
-build`/`test` against `ArbiScanner.McpServer.slnx`, and published `.trx` test results. No
-sibling repos need checking out (see [Docker Build](#docker-build)).
+build`/`test` against `ArbiScanner.McpServer.slnx` (unit **and** integration tests — the
+integration suite needs no Docker/Testcontainers, see [Testing](#testing), so there's nothing
+extra for CI to provision), and published `.trx` test results. No sibling repos need checking
+out (see [Docker Build](#docker-build)).
 
 ### `deploy.yml`
 
@@ -327,19 +329,47 @@ quality gate → build and push `ghcr.io/dimasdom/arbiscanner-mcp-server` to GHC
 
 ## Testing
 
-`ArbiScanner.McpServer.Tests` is a unit test project (xUnit + FluentAssertions + Moq) covering
-the Infrastructure layer's HTTP-facing and auth logic against a stub `HttpMessageHandler` /
-`DefaultHttpContext`:
+Two test projects — both run without Docker or any external dependency:
 
-| File | Coverage |
-|---|---|
-| `KeycloakRefreshTokenProviderTests` | Cache hit/miss per presented token, independent caching across different callers, the refresh buffer window, `forceRefresh` correctly bypassing a still-valid cache (including inside the double-checked lock), concurrent callers from the *same* caller only triggering one Keycloak round-trip, and failure/exception paths |
-| `McpAuthenticationMiddlewareTests` | Missing/non-Bearer header → 401 without calling `next`, failed token exchange → 401, successful exchange → `next` is called |
-| `SpreadsApiClientTests` | Bearer token attachment, URL construction (including id escaping), envelope success/failure mapping, the 401-forces-refresh-and-retries-once path, missing-inbound-token handling, and malformed-response handling |
+### `ArbiScanner.McpServer.Tests` (unit)
+
+xUnit + FluentAssertions + Moq, covering `SpreadsApiClient` against a stub
+`HttpMessageHandler`: forwards the caller's own token unchanged, URL construction (including
+id escaping), envelope success/failure mapping, a downstream 401 failing cleanly without any
+retry, missing-inbound-token handling, and malformed-response handling.
 
 ```bash
 cd ArbiScanner.McpServer
 dotnet test ArbiScanner.McpServer.Tests/ArbiScanner.McpServer.Tests.csproj
+```
+
+### `ArbiScanner.McpServer.IntegrationTests`
+
+Hosts the **real** app via `WebApplicationFactory<Program>` — real DI graph, real middleware
+pipeline, real `MapMcp`/tool registration, real JWT bearer validation (against a forged but
+correctly-signed test token, the same fast pattern `ArbiScannerWeb.IntegrationTests` uses for
+most of its suite — see that project's `JwtTestSettings`/`JwtTestTokenFactory`) — with only the
+downstream `ArbiScannerWeb.API` call stubbed. Tool calls are driven through the **real MCP
+client SDK** (`ModelContextProtocol.Client`'s `HttpClientTransport` + `McpClient`), not
+hand-rolled JSON-RPC, so the actual Streamable HTTP protocol round-trip is exercised, not just
+raw HTTP status codes.
+
+| Test | Proves |
+|---|---|
+| `Health_ReturnsOk_WithoutAuthentication` | `/health` needs no credential |
+| `Mcp_WithoutBearerToken_ConnectFailsAndNeverReachesWebApi` | Unauthenticated MCP connections are rejected before any tool can run |
+| `Mcp_WithExpiredToken_ConnectFailsAndNeverReachesWebApi` | Token lifetime is actually enforced |
+| `CallTool_GetSpreadsForCurrentUser_ForwardsCallersOwnTokenAndReturnsData` | The *exact* token the caller presented reaches `ArbiScannerWeb.API` unchanged, and a real MCP tool-call round-trip returns the expected data |
+| `CallTool_GetSpreadById_UrlEncodesIdAndSurfacesWebApiFailureAsToolText` | Id escaping, and downstream failures surface as tool text rather than throwing |
+
+Standard Token Exchange against a real Keycloak — i.e. proving `KEYCLOAK_MCP_CLIENT_ID`/`_SECRET`
+and the `access.token.lifespan` override actually produce a usable 30-day token — is covered
+separately, with a real Testcontainers Keycloak, by `ArbiScannerWeb.IntegrationTests`'
+`McpTokenControllerTests`; re-proving that here would just be slower, not more correct.
+
+```bash
+cd ArbiScanner.McpServer
+dotnet test ArbiScanner.McpServer.IntegrationTests/ArbiScanner.McpServer.IntegrationTests.csproj
 ```
 
 ---
@@ -359,16 +389,13 @@ ArbiScanner.McpServer/
 │
 ├── ArbiScanner.McpServer.Abstractions/
 │   └── Interfaces/
-│       ├── ISpreadsApiClient.cs
-│       └── IOutboundTokenProvider.cs
+│       └── ISpreadsApiClient.cs
 │
 ├── ArbiScanner.McpServer.Infrastructure/
 │   ├── Services/
-│   │   ├── SpreadsApiClient.cs
-│   │   └── KeycloakRefreshTokenProvider.cs
+│   │   └── SpreadsApiClient.cs
 │   ├── Authentication/
-│   │   ├── BearerTokenReader.cs
-│   │   └── McpAuthenticationMiddleware.cs
+│   │   └── BearerTokenReader.cs
 │   └── StartupSetup.cs
 │
 ├── ArbiScanner.McpServer.Host/
@@ -378,7 +405,8 @@ ArbiScanner.McpServer/
 │   ├── appsettings.template.json
 │   └── appsettings.Development.template.json
 │
-├── ArbiScanner.McpServer.Tests/
+├── ArbiScanner.McpServer.Tests/                  # unit
+├── ArbiScanner.McpServer.IntegrationTests/        # WebApplicationFactory + real MCP client SDK
 ├── Dockerfile
 └── ArbiScanner.McpServer.slnx
 ```

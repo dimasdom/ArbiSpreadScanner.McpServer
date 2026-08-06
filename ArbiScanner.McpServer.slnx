@@ -4,4 +4,5 @@
   <Project Path="ArbiScanner.McpServer.Infrastructure/ArbiScanner.McpServer.Infrastructure.csproj" />
   <Project Path="ArbiScanner.McpServer.Host/ArbiScanner.McpServer.Host.csproj" />
   <Project Path="ArbiScanner.McpServer.Tests/ArbiScanner.McpServer.Tests.csproj" />
+  <Project Path="ArbiScanner.McpServer.IntegrationTests/ArbiScanner.McpServer.IntegrationTests.csproj" />
 </Solution>

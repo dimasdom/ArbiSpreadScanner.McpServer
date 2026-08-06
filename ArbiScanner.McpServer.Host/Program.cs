@@ -1,5 +1,4 @@
 using ArbiScanner.McpServer.Infrastructure;
-using ArbiScanner.McpServer.Infrastructure.Authentication;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
@@ -27,16 +26,16 @@ try
 
     builder.Services.AddHttpContextAccessor();
     builder.Services.AddKeycloakOptions(builder.Configuration);
-    builder.Services.AddOutboundHttpClients(builder.Configuration);
+    builder.Services.AddWebApiHttpClient(builder.Configuration);
     builder.Services.AddMcpServices();
+    builder.Services.AddAuthenticationJwt(builder.Configuration, builder.Environment);
+    builder.Services.AddAuthorization();
 
     builder.Services
         .AddMcpServer()
         .WithHttpTransport()
         .WithToolsFromAssembly();
 
-    // No specific checks — this service holds no server-wide credential to validate
-    // anymore (see McpAuthenticationMiddleware); /health is bare liveness.
     builder.Services.AddHealthChecks();
 
     var observabilityEnabled = builder.Configuration.GetValue("Observability:Enabled", true);
@@ -71,19 +70,16 @@ try
     if (app.Environment.IsDevelopment())
         app.UseHttpsRedirection();
 
-    // MCP tool calls (SpreadTools) always require a bearer token that exchanges
-    // successfully against Keycloak — see McpAuthenticationMiddleware and
-    // KeycloakRefreshTokenProvider. Scoped to /mcp only so /health stays open for
-    // Docker healthchecks with no credential.
-    app.UseWhen(
-        ctx => ctx.Request.Path.StartsWithSegments("/mcp"),
-        branch => branch.UseMiddleware<McpAuthenticationMiddleware>());
+    app.UseAuthentication();
+    app.UseAuthorization();
 
     // Explicit "/mcp" (rather than the SDK's root-mapped default) so this matches
     // regardless of whether the caller reaches this container directly
-    // (docker-compose.local.yml, port 8087) or through the nginx /mcp/ route, which
-    // preserves the path rather than stripping it — see nginx/nginx.conf.
-    app.MapMcp("/mcp");
+    // (docker-compose.local.yml, port 8087) or through the nginx /mcp route, which
+    // proxies the path through unchanged — see nginx/nginx.conf. Every MCP call
+    // requires a valid Keycloak-issued bearer token (RequireAuthorization); SpreadsApiClient
+    // then forwards that same token as-is to ArbiScannerWeb.API.
+    app.MapMcp("/mcp").RequireAuthorization();
     app.MapHealthChecks("/health");
 
     await app.RunAsync();
@@ -95,4 +91,9 @@ catch (Exception ex)
 finally
 {
     await Log.CloseAndFlushAsync();
+}
+
+public partial class Program
+{
+    protected Program() { }
 }

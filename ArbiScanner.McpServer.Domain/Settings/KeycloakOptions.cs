@@ -1,26 +1,24 @@
 namespace ArbiScanner.McpServer.Domain.Settings;
 
 /// <summary>
-/// Config for the arbiscanner-mcp confidential client. This server is multi-tenant by
-/// pass-through: the caller presents their own long-lived offline_access refresh token
-/// (obtained from ArbiScannerWeb's "MCP Access" page — see
-/// ArbiScannerWeb.Infrastructure.Services.McpTokenService) as their bearer credential.
-/// This client's id/secret is used to exchange that presented refresh token for a
-/// short-lived access token, which doubles as both the "is this caller allowed in"
-/// check and the outbound Bearer used to call ArbiScannerWeb.API on their behalf.
+/// Resource-server config for validating the caller's own long-lived MCP access token
+/// (minted via ArbiScannerWeb's "MCP Access" page — see
+/// ArbiScannerWeb.Infrastructure.Services.McpTokenService, and the arbiscanner-mcp
+/// client's access.token.lifespan override in keycloak/realm-export). This server is
+/// multi-tenant by pass-through: the same validated token is forwarded as-is to
+/// ArbiScannerWeb.API (it already carries that audience too), so there is no separate
+/// exchange or credential minted by this server itself.
 /// </summary>
 public class KeycloakOptions
 {
     public const string SectionName = "Keycloak";
 
     /// <summary>
-    /// The Keycloak realm issuer, e.g. https://auth.arbiscannerwebapp.site/realms/arbiscanner-web
-    /// — the token endpoint is resolved as {Authority}/protocol/openid-connect/token.
+    /// The Keycloak realm issuer used for JWKS discovery, e.g.
+    /// https://auth.arbiscannerwebapp.site/realms/arbiscanner-web
     /// </summary>
     public string Authority { get; set; } = string.Empty;
 
-    /// <summary>The arbiscanner-mcp confidential client id.</summary>
-    public string ClientId { get; set; } = string.Empty;
-
-    public string ClientSecret { get; set; } = string.Empty;
+    /// <summary>The expected audience claim on incoming access tokens — arbiscanner-mcp.</summary>
+    public string Audience { get; set; } = string.Empty;
 }

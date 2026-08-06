@@ -1,8 +1,6 @@
 using System.Net;
-using ArbiScanner.McpServer.Abstractions.Interfaces;
 using ArbiScanner.McpServer.Infrastructure.Services;
 using FluentAssertions;
-using FluentResults;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Primitives;
@@ -13,7 +11,7 @@ namespace ArbiScanner.McpServer.Tests;
 
 public class SpreadsApiClientTests
 {
-    private const string PresentedToken = "caller-refresh-token";
+    private const string PresentedToken = "callers-own-access-token";
 
     private sealed class StubHttpMessageHandler : HttpMessageHandler
     {
@@ -29,15 +27,12 @@ public class SpreadsApiClientTests
 
     private readonly StubHttpMessageHandler _handler = new();
     private readonly Mock<IHttpClientFactory> _httpClientFactory = new();
-    private readonly Mock<IOutboundTokenProvider> _tokenProvider = new();
     private readonly Mock<ILogger<SpreadsApiClient>> _logger = new();
 
     public SpreadsApiClientTests()
     {
         _httpClientFactory.Setup(f => f.CreateClient("WebApi"))
             .Returns(() => new HttpClient(_handler) { BaseAddress = new Uri("http://web.local/") });
-        _tokenProvider.Setup(t => t.GetAccessTokenAsync(PresentedToken, It.IsAny<CancellationToken>(), false))
-            .ReturnsAsync(Result.Ok("access-token"));
     }
 
     private static IHttpContextAccessor CreateContextAccessor(string? presentedToken = PresentedToken)
@@ -52,7 +47,7 @@ public class SpreadsApiClientTests
     }
 
     private SpreadsApiClient CreateSut(string? presentedToken = PresentedToken) =>
-        new(_httpClientFactory.Object, _tokenProvider.Object, CreateContextAccessor(presentedToken), _logger.Object);
+        new(_httpClientFactory.Object, CreateContextAccessor(presentedToken), _logger.Object);
 
     private static HttpResponseMessage JsonResponse(HttpStatusCode status, string json) => new(status)
     {
@@ -60,13 +55,13 @@ public class SpreadsApiClientTests
     };
 
     [Fact]
-    public async Task GetSpreadsForUserAsync_Success_AttachesBearerTokenAndReturnsValue()
+    public async Task GetSpreadsForUserAsync_Success_ForwardsTheCallersOwnTokenAsIsAndReturnsValue()
     {
         _handler.OnRequest = req =>
         {
             req.RequestUri!.AbsolutePath.Should().Be("/api/TradeOpportunity/GetSpreadsForUser");
             req.Headers.Authorization!.Scheme.Should().Be("Bearer");
-            req.Headers.Authorization!.Parameter.Should().Be("access-token");
+            req.Headers.Authorization!.Parameter.Should().Be(PresentedToken);
             return JsonResponse(HttpStatusCode.OK, """{"isSuccess":true,"value":[],"message":""}""");
         };
 
@@ -114,51 +109,28 @@ public class SpreadsApiClientTests
     }
 
     [Fact]
-    public async Task GetSpreadsForUserAsync_Unauthorized_ForcesTokenRefreshAndRetriesOnce()
+    public async Task GetSpreadsForUserAsync_WebApiRejectsTheToken_ReturnsFailWithoutRetrying()
     {
-        _tokenProvider.Setup(t => t.GetAccessTokenAsync(PresentedToken, It.IsAny<CancellationToken>(), true))
-            .ReturnsAsync(Result.Ok("refreshed-token"));
-
-        var attempt = 0;
-        _handler.OnRequest = req =>
-        {
-            attempt++;
-            if (attempt == 1)
-            {
-                req.Headers.Authorization!.Parameter.Should().Be("access-token");
-                return new HttpResponseMessage(HttpStatusCode.Unauthorized);
-            }
-
-            req.Headers.Authorization!.Parameter.Should().Be("refreshed-token");
-            return JsonResponse(HttpStatusCode.OK, """{"isSuccess":true,"value":[],"message":""}""");
-        };
-
-        var result = await CreateSut().GetSpreadsForUserAsync(CancellationToken.None);
-
-        result.IsSuccess.Should().BeTrue();
-        attempt.Should().Be(2);
-        _tokenProvider.Verify(t => t.GetAccessTokenAsync(PresentedToken, It.IsAny<CancellationToken>(), true), Times.Once);
-    }
-
-    [Fact]
-    public async Task GetSpreadsForUserAsync_TokenProviderFails_ReturnsFail()
-    {
-        _tokenProvider.Setup(t => t.GetAccessTokenAsync(PresentedToken, It.IsAny<CancellationToken>(), false))
-            .ReturnsAsync(Result.Fail<string>("refresh token expired"));
+        // There is nothing to refresh — the caller's token is a fixed-lifetime credential
+        // this service doesn't manage. A 401 from downstream just means it's invalid or
+        // expired; the only remedy is generating a new one from the "MCP Access" page.
+        _handler.OnRequest = _ => new HttpResponseMessage(HttpStatusCode.Unauthorized);
 
         var result = await CreateSut().GetSpreadsForUserAsync(CancellationToken.None);
 
         result.IsFailed.Should().BeTrue();
-        result.Errors[0].Message.Should().Contain("refresh token expired");
+        result.Errors[0].Message.Should().Contain("Unauthorized");
+        _handler.Requests.Should().HaveCount(1);
     }
 
     [Fact]
-    public async Task GetSpreadsForUserAsync_NoInboundToken_ReturnsFail()
+    public async Task GetSpreadsForUserAsync_NoInboundToken_ReturnsFailWithoutCallingWebApi()
     {
         var result = await CreateSut(presentedToken: null).GetSpreadsForUserAsync(CancellationToken.None);
 
         result.IsFailed.Should().BeTrue();
         result.Errors[0].Message.Should().Contain("No inbound bearer token");
+        _handler.Requests.Should().BeEmpty();
     }
 
     [Fact]
