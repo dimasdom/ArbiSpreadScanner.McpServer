@@ -1,8 +1,8 @@
 name: Deploy
 
-# Manual on-demand deploy: runs unit tests, enforces the SonarCloud quality gate,
-# and only on success builds+pushes the Docker image to GHCR and restarts the
-# mcp-server container on the VPS. See the reusable workflow
+# Manual on-demand deploy: runs unit + integration tests, enforces the SonarCloud
+# quality gate, and only on success builds+pushes the Docker image to GHCR and
+# restarts the mcp-server container on the VPS. See the reusable workflow
 # (dimasdom/SpreadScanner/.github/workflows/deploy-service.yml) for the full job
 # graph and scripts/deploy-remote.sh for the VPS-side restart/rollback logic.
 # No sibling repos needed — unlike ArbiScanner.TelegramNotifierApp, this service
@@ -27,6 +27,7 @@ jobs:
       sonar_project_key: dimasdom_ArbiSpreadScanner.McpServer
       solution_file: ArbiScanner.McpServer.slnx
       unit_test_project: ArbiScanner.McpServer.Tests/ArbiScanner.McpServer.Tests.csproj
+      integration_test_project: ArbiScanner.McpServer.IntegrationTests/ArbiScanner.McpServer.IntegrationTests.csproj
       sonar_begin_extra_args: >-
         /d:sonar.exclusions="**/Program.cs,**/ArbiScanner.McpServer.Domain/**,**/ArbiScanner.McpServer.Abstractions/Interfaces/**"
       sibling_repos: "[]"

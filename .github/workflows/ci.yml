@@ -81,6 +81,14 @@ jobs:
           --results-directory ./TestResults
           --collect:"XPlat Code Coverage;Format=opencover"
 
+      - name: Integration tests
+        run: >
+          dotnet test ArbiScanner.McpServer.IntegrationTests/ArbiScanner.McpServer.IntegrationTests.csproj
+          --no-restore --configuration Release
+          --logger "trx;LogFileName=integration-tests.trx"
+          --results-directory ./TestResults
+          --collect:"XPlat Code Coverage;Format=opencover"
+
       - name: End SonarCloud analysis
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
