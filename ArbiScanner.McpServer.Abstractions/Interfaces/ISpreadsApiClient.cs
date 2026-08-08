@@ -11,4 +11,6 @@ public interface ISpreadsApiClient
     Task<Result<List<SpreadDetailsDto>>> GetSpreadsForUserAsync(CancellationToken cancellationToken);
 
     Task<Result<SpreadDetailsDto>> GetSpreadByIdAsync(string id, CancellationToken cancellationToken);
+
+    Task<Result<List<RecommendedSpreadDto>>> GetRecommendedSpreadsAsync(CancellationToken cancellationToken);
 }

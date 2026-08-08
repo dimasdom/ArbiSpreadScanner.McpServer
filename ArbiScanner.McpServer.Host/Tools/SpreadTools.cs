@@ -13,7 +13,14 @@ namespace ArbiScanner.McpServer.Host.Tools;
 [McpServerToolType]
 public sealed class SpreadTools
 {
-    private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = false };
+    // camelCase to match ArbiScannerWeb.API's own JSON output (ASP.NET Core MVC's default) -
+    // without this, tool JSON comes back PascalCase (e.g. "PositionModel" not
+    // "positionModel"), silently inconsistent with every other JSON payload in this app.
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        WriteIndented = false,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+    };
 
     private readonly ISpreadsApiClient _client;
 
@@ -27,6 +34,16 @@ public sealed class SpreadTools
         return result.IsSuccess
             ? JsonSerializer.Serialize(result.Value, JsonOptions)
             : $"Error retrieving spreads: {result.Errors.FirstOrDefault()?.Message}";
+    }
+
+    [McpServerTool(Name = "get_recommended_spreads")]
+    [Description("Returns the top 2 recommended arbitrage spreads per category (Futures, Funding, Spot) among the current user's available spreads, already ranked by lowest combined funding+slippage cost among spreads with at least 1% spread. Use this for \"what should I look at\"/\"recommend a spread\" style questions.")]
+    public async Task<string> GetRecommendedSpreads(CancellationToken cancellationToken)
+    {
+        var result = await _client.GetRecommendedSpreadsAsync(cancellationToken);
+        return result.IsSuccess
+            ? JsonSerializer.Serialize(result.Value, JsonOptions)
+            : $"Error retrieving recommended spreads: {result.Errors.FirstOrDefault()?.Message}";
     }
 
     [McpServerTool(Name = "get_spread_by_id")]

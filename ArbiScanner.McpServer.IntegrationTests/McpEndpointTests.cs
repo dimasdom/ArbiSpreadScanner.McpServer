@@ -120,6 +120,61 @@ public class McpEndpointTests : IClassFixture<McpServerWebApplicationFactory>
         (result.IsError ?? false).Should().BeFalse();
         var content = Assert.Single(result.Content.OfType<TextContentBlock>());
         content.Text.Should().Contain("BTCUSDT").And.Contain("BTC group");
+        // Must match ArbiScannerWeb.API's own (camelCase) JSON output convention - a client
+        // structurally parsing this tool's JSON, not just displaying it as text, breaks if
+        // this ever regresses back to System.Text.Json's PascalCase default.
+        content.Text.Should().Contain("\"positionModel\"").And.NotContain("\"PositionModel\"");
+        forwardedAuthHeader.Should().Be(token, "SpreadsApiClient forwards the caller's own token as-is, it does not mint a different one");
+    }
+
+    [Fact]
+    public async Task CallTool_GetRecommendedSpreads_ForwardsCallersOwnTokenAndReturnsData()
+    {
+        var token = JwtTestTokenFactory.CreateToken("user-123");
+        string? forwardedAuthHeader = null;
+        _factory.WebApiHandler.OnRequest = req =>
+        {
+            forwardedAuthHeader = req.Headers.Authorization?.Parameter;
+            req.RequestUri!.AbsolutePath.Should().Be("/api/TradeOpportunity/GetRecommendedSpreads");
+            return JsonResponse(HttpStatusCode.OK, """
+                {
+                  "isSuccess": true,
+                  "value": [
+                    {
+                      "details": {
+                        "positionModel": {
+                          "symbol": "BTCUSDT",
+                          "exchangeRateA": { "symbol": "BTCUSDT", "exchange": "Binance", "exchangeRate": 60000 },
+                          "exchangeRateB": { "symbol": "BTCUSDT", "exchange": "Bybit", "exchangeRate": 60100 },
+                          "exchangeShort": { "symbol": "BTCUSDT", "exchange": "Bybit", "exchangeRate": 60100 },
+                          "exchangeLong": { "symbol": "BTCUSDT", "exchange": "Binance", "exchangeRate": 60000 },
+                          "spread": 2.5,
+                          "type": 0
+                        },
+                        "tickers": [],
+                        "groupName": "BTC group"
+                      },
+                      "category": 0
+                    }
+                  ],
+                  "message": ""
+                }
+                """);
+        };
+
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var mcpClient = await ConnectAsync(client, CancellationToken.None);
+
+        var result = await mcpClient.CallToolAsync(
+            "get_recommended_spreads",
+            new Dictionary<string, object?>(),
+            cancellationToken: CancellationToken.None);
+
+        (result.IsError ?? false).Should().BeFalse();
+        var content = Assert.Single(result.Content.OfType<TextContentBlock>());
+        content.Text.Should().Contain("BTCUSDT").And.Contain("BTC group");
+        content.Text.Should().Contain("\"category\"").And.NotContain("\"Category\"");
         forwardedAuthHeader.Should().Be(token, "SpreadsApiClient forwards the caller's own token as-is, it does not mint a different one");
     }
 

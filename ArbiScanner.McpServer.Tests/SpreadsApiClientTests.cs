@@ -134,6 +134,44 @@ public class SpreadsApiClientTests
     }
 
     [Fact]
+    public async Task GetRecommendedSpreadsAsync_Success_ForwardsTheCallersOwnTokenAsIsAndReturnsValue()
+    {
+        _handler.OnRequest = req =>
+        {
+            req.RequestUri!.AbsolutePath.Should().Be("/api/TradeOpportunity/GetRecommendedSpreads");
+            req.Headers.Authorization!.Scheme.Should().Be("Bearer");
+            req.Headers.Authorization!.Parameter.Should().Be(PresentedToken);
+            return JsonResponse(HttpStatusCode.OK, """{"isSuccess":true,"value":[],"message":""}""");
+        };
+
+        var result = await CreateSut().GetRecommendedSpreadsAsync(CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue();
+        result.Value.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task GetRecommendedSpreadsAsync_EnvelopeIsSuccessFalse_ReturnsFailWithMessage()
+    {
+        _handler.OnRequest = _ => JsonResponse(HttpStatusCode.OK, """{"isSuccess":false,"message":"No active subscription"}""");
+
+        var result = await CreateSut().GetRecommendedSpreadsAsync(CancellationToken.None);
+
+        result.IsFailed.Should().BeTrue();
+        result.Errors[0].Message.Should().Be("No active subscription");
+    }
+
+    [Fact]
+    public async Task GetRecommendedSpreadsAsync_NoInboundToken_ReturnsFailWithoutCallingWebApi()
+    {
+        var result = await CreateSut(presentedToken: null).GetRecommendedSpreadsAsync(CancellationToken.None);
+
+        result.IsFailed.Should().BeTrue();
+        result.Errors[0].Message.Should().Contain("No inbound bearer token");
+        _handler.Requests.Should().BeEmpty();
+    }
+
+    [Fact]
     public async Task GetSpreadsForUserAsync_MalformedJson_ReturnsFailAndLogs()
     {
         _handler.OnRequest = _ => JsonResponse(HttpStatusCode.OK, "not-json");

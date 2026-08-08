@@ -41,6 +41,9 @@ public sealed class SpreadsApiClient : ISpreadsApiClient
     public Task<Result<SpreadDetailsDto>> GetSpreadByIdAsync(string id, CancellationToken cancellationToken) =>
         GetAsync<SpreadDetailsDto>($"api/TradeOpportunity/GetSpreadInfo/{Uri.EscapeDataString(id)}", cancellationToken);
 
+    public Task<Result<List<RecommendedSpreadDto>>> GetRecommendedSpreadsAsync(CancellationToken cancellationToken) =>
+        GetAsync<List<RecommendedSpreadDto>>("api/TradeOpportunity/GetRecommendedSpreads", cancellationToken);
+
     private async Task<Result<T>> GetAsync<T>(string relativeUrl, CancellationToken cancellationToken)
     {
         var presentedToken = BearerTokenReader.Read(_httpContextAccessor.HttpContext);
