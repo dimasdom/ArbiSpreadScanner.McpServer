@@ -236,7 +236,7 @@ directly in `ArbiScannerWeb.API` and calls `ITradeOpportunityService`.
 
    ```bash
    docker compose -f docker-compose.yml -f docker-compose.local.yml \
-     up -d postgres rabbitmq redis mongodb keycloak web
+     up -d postgres kafka kafka-init redis mongodb keycloak web
    ```
 
 3. Follow the monorepo root's `keycloak/README.md` "Local development" section, then run
